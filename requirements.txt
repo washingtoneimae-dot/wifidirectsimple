@@ -1,0 +1,5 @@
+winrt-Windows.Devices.WiFiDirect
+winrt-Windows.Devices.Enumeration
+winrt-Windows.Foundation
+winrt-Windows.Foundation.Collections
+winrt-Windows.Security.Credentials

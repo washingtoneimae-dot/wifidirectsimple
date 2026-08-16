@@ -1,39 +1,40 @@
-# PeerDrop LAN
+# WiFi Direct & High-Speed LAN File Transfer (Windows)
 
-A small, working desktop program for sending files directly between PCs connected to the same Wi-Fi network, Ethernet LAN, or one PC's mobile hotspot. It does not upload files to the internet or require an account.
+High-performance, clean Windows desktop application for transferring files between PCs at maximum network speeds over **WiFi Direct**, **Mobile Hotspot**, or **Local Wi-Fi/LAN**.
 
-## Run
+---
 
-1. Double-click `setup.bat` on each Windows PC. It checks Python, installs Python 3.13 through Windows Package Manager if needed, verifies the desktop UI support, and runs the local checks. Python 3.13 works. Some Microsoft Office installations include an internal Python component that cannot run normal desktop apps; setup installs the regular Python app when needed.
-2. Copy this folder to each PC.
-3. Double-click `run.bat`, or open the folder in a terminal and run `py -3 app.py`.
-4. If Windows Firewall asks, allow access on **Private networks**.
-5. Each PC should appear in the other PC's nearby-device list. Select a device, choose **Send file**, then accept the request on the receiving PC.
+## ⚡ Key Features
+- **High-Speed Transfer Engine**: Binary streaming protocol over TCP with 512 KB chunks, 2 MB socket buffers, and `TCP_NODELAY`.
+- **Zero-Configuration Discovery**: Automatic peer discovery across all network subnets using UDP broadcast beacons.
+- **Asymmetric Dual Transfer**: Send and receive back-and-forth simultaneously without stopping or reversing roles.
+- **2-Way Handshake & Integrity**: Pre-flight disk space verification, path sanitization, and on-the-fly CRC-32 checksums.
+- **Obsidian & Cobalt UI**: Clean, high-contrast dark design with no distracting animations.
 
-## Mesh-style sending
+---
 
-Use the **Network** tab to set the nickname other PCs see. On the **Send** tab, select one PC and use **Save selected peer name** to give it your own persistent label; both that label and the PC's shared nickname are shown. Labels are linked to a stable opaque device fingerprint, not an IP address, so they remain correct after DHCP, hotspot, or adapter changes. Hold `Ctrl` while selecting devices (or use `Shift` for a range), choose one file, and it is sent directly to every selected PC at the same time. Each receiving PC approves or declines independently.
+## 🚀 How to Run
 
-## Folders
+### Option 1: Double-Click
+Double-click [`run.bat`](file:///c:/Users/washi/Downloads/wifi/run.bat).
 
-Select one or more PCs, then choose **Send folder**. The selected folder, its subfolders, and files retain their arrangement on the receiving PC. Each recipient receives and unpacks its own copy; the same safe chunk tuning is used for the transfer.
+### Option 2: Command Line
+```powershell
+python main.py
+```
 
-## Transfer tuning
+---
 
-The Network tab defaults to **Automatic (recommended)**. It starts at 256 KB and safely adjusts between 64 KB and 1 MB as a transfer runs. You can instead select a fixed size: try 128 KB or 64 KB for unstable hotspot links, or 512 KB/1 MB on strong, fast Wi-Fi. A selected mode applies to newly started transfers and is saved for later.
+## 💻 How to Transfer Files Between 2 Windows PCs
 
-The app automatically shows Wi-Fi connection state and the local IPv4 address(es) below the PC settings. Select **Open Mobile Hotspot** to open Windows' Mobile Hotspot setup. Turn it on there, have the other PC join that hotspot, then both PCs can discover and exchange files in either direction.
+1. Launch the application on both PCs via [`run.bat`](file:///c:/Users/washi/Downloads/wifi/run.bat).
+2. To send files:
+   - Go to the **SEND FILES** tab.
+   - Select the target PC from the **Discovered Devices** dropdown (or enter its IP).
+   - Click **+ Add Files...** and click **START TRANSFER**.
+3. Files will stream directly PC-to-PC, verified with CRC-32 checksums, and appear in the **RECEIVE / HOST** save directory.
 
-## Notes
+---
 
-- This uses local Wi-Fi/LAN connectivity. Native Windows Wi-Fi Direct pairing is hardware/driver-specific, so using the same Wi-Fi or a hotspot is the most reliable PC-to-PC path.
-- Received files go to `Downloads\PeerDrop` unless changed in the app.
-- Transfers require acceptance by default. The receiver can enable automatic acceptance for trusted networks.
-- Automatic acceptance is limited to files up to 20 GB. Larger files always show an explicit confirmation prompt.
-- A file is marked **Sent** only after the receiving PC confirms it fully saved the file. Failed or declined transfers appear in the activity list, and incomplete received files are removed.
-- Devices are discovered with local UDP broadcast (port 45871); files are transferred over TCP (port 45872). Both PCs must be on the same local network, and firewall rules must allow those ports on private networks.
-- If a router hides devices from each other, enter the other PC's private IP address in **Add PC by IP** (on that PC, run `ipconfig` and use its IPv4 Address).
-
-## Test
-
-Run `py -3 -m unittest -v` in this folder.
+## 🛡️ Windows Firewall Setup
+If transferring across PCs for the first time, click **Fix Firewall** in the app or run [`allow_firewall.bat`](file:///c:/Users/washi/Downloads/wifi/allow_firewall.bat) as Administrator on both machines.
