@@ -780,16 +780,11 @@ class PeerDropApp:
         self.root.minsize(620, 500)
         self.events: queue.Queue = queue.Queue()
         self.settings = load_settings()
-        device_identity = self.settings.get("device_id")
-        if not isinstance(device_identity, str) or not device_identity:
-            device_identity = str(uuid.uuid4())
-            self.settings["device_id"] = device_identity
-        device_id = stable_fingerprint(device_identity)
+        # Ephemeral identity: a fresh random ID is generated on every launch
+        # and never persisted, so the app leaves no stored device fingerprint.
+        device_id = stable_fingerprint(str(uuid.uuid4()))
         stored_name = self.settings.get("nickname")
         self.device_name = StringVar(value=stored_name if isinstance(stored_name, str) and stored_name else local_name())
-        stored_aliases = self.settings.get("peer_aliases", {})
-        self.peer_aliases: dict[str, str] = stored_aliases if isinstance(stored_aliases, dict) else {}
-        self.peer_alias = StringVar()
         stored_chunk = self.settings.get("chunk_size")
         self.chunk_size = stored_chunk if stored_chunk in CHUNK_SIZES or stored_chunk == "auto" else "auto"
         self.chunk_text = StringVar(value="Automatic (recommended)" if self.chunk_size == "auto" else f"{self.chunk_size // 1024} KB")
@@ -861,25 +856,20 @@ class PeerDropApp:
 
         devices = ttk.LabelFrame(self.send_tab, text="Mesh devices — select one or more PCs", padding=8)
         devices.pack(fill="both", expand=True, pady=(0, 8))
-        self.tree = ttk.Treeview(devices, columns=("name", "shared_name", "fingerprint", "address"), show="headings", selectmode="extended", height=8)
-        self.tree.heading("name", text="Your saved name")
-        self.tree.heading("shared_name", text="PC nickname")
+        self.tree = ttk.Treeview(devices, columns=("name", "fingerprint", "address"), show="headings", selectmode="extended", height=8)
+        self.tree.heading("name", text="Peer name")
         self.tree.heading("fingerprint", text="Device ID")
         self.tree.heading("address", text="Address")
         self.tree.column("name", width=180)
-        self.tree.column("shared_name", width=150)
         self.tree.column("fingerprint", width=105)
         self.tree.column("address", width=130)
         self.tree.pack(side="left", fill="both", expand=True)
-        self.tree.bind("<<TreeviewSelect>>", self.load_selected_peer_alias)
         ttk.Scrollbar(devices, orient="vertical", command=self.tree.yview).pack(side="right", fill="y")
         self.tree.configure(yscrollcommand=lambda first, last: None)
 
         actions = ttk.Frame(self.send_tab, padding=(0, 0, 0, 10))
         actions.pack(fill="x")
         ttk.Button(actions, text="Refresh devices", command=self.service._announce).pack(side="left")
-        ttk.Button(actions, text="Save selected peer name", command=self.save_peer_alias).pack(side="left", padx=(8, 0))
-        ttk.Entry(actions, textvariable=self.peer_alias, width=22).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="Send file to selected PCs…", command=self.pick_and_send).pack(side="right")
         ttk.Button(actions, text="Send folder…", command=self.pick_and_send_folder).pack(side="right", padx=(0, 8))
         ttk.Label(actions, textvariable=self.progress_text).pack(side="right", padx=15)
@@ -934,41 +924,16 @@ class PeerDropApp:
 
     def _save_settings(self) -> None:
         try:
-            self.settings["peer_aliases"] = self.peer_aliases
             save_settings(self.settings)
         except OSError as error:
-            self._add_activity("Failed", f"Could not save names: {error}")
-
-    def _display_peer_name(self, peer: dict) -> str:
-        return self.peer_aliases.get(peer["id"], "—")
+            self._add_activity("Failed", f"Could not save settings: {error}")
 
     def _upsert_peer(self, peer: dict) -> None:
-        values = (self._display_peer_name(peer), peer["name"], peer["id"][:10], peer["host"])
+        values = (peer["name"], peer["id"][:10], peer["host"])
         if self.tree.exists(peer["id"]):
             self.tree.item(peer["id"], values=values)
         else:
             self.tree.insert("", "end", iid=peer["id"], values=values)
-
-    def save_peer_alias(self) -> None:
-        selected = self.tree.selection()
-        if len(selected) != 1:
-            messagebox.showinfo(APP_NAME, "Select exactly one PC to save its name.")
-            return
-        peer_id = selected[0]
-        alias = self.peer_alias.get().strip()
-        if alias:
-            self.peer_aliases[peer_id] = alias
-        else:
-            self.peer_aliases.pop(peer_id, None)
-        peer = self.service.peers.get(peer_id)
-        if peer:
-            self._upsert_peer(peer)
-        self._save_settings()
-        self._add_activity("Named", f"Saved name for {peer['name'] if peer else peer_id}: {alias or 'removed'}")
-
-    def load_selected_peer_alias(self, _event=None) -> None:
-        selected = self.tree.selection()
-        self.peer_alias.set(self.peer_aliases.get(selected[0], "") if len(selected) == 1 else "")
 
     def refresh_network(self) -> None:
         self.network_text.set(network_summary())
