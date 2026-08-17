@@ -821,6 +821,21 @@ class PeerDropApp:
 
     def _build(self) -> None:
         pad = {"padx": 12, "pady": 7}
+        # Size the treeview rows from the actual font metrics so device names
+        # and the activity log are never clipped. On Linux "Segoe UI" is absent
+        # and Tk falls back to a taller font (e.g. Noto Sans, ~37px line height),
+        # so a hardcoded row height would cut the bottom of the text off.
+        try:
+            from tkinter import font as tk_font
+            tree_font = tk_font.Font(font=("Segoe UI", 10))
+            metrics = tree_font.metrics()
+            line_height = metrics.get("linespace") or (metrics.get("ascent", 10) + metrics.get("descent", 4))
+            row_height = line_height + 10
+            style = ttk.Style()
+            style.configure("Treeview", rowheight=row_height, font=("Segoe UI", 10))
+            style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
+        except (tk.TclError, ImportError):
+            pass
         top = ttk.Frame(self.root, padding=12)
         top.pack(fill="x")
         ttk.Label(top, text=APP_NAME, font=("Segoe UI", 18, "bold")).pack(side="left")
