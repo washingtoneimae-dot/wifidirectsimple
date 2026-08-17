@@ -33,7 +33,7 @@ type App struct {
 	peerList   *widget.List
 	peerData   []discovery.Peer
 	selected   int // index into peerData of the currently selected peer (-1 = none)
-	recvLog    *widget.Entry
+	recvLog    *widget.Label
 	progress   *widget.ProgressBar
 	status     *widget.Label
 	autoAccept *widget.Check
@@ -42,6 +42,10 @@ type App struct {
 
 	activeSendName string
 	activeRecvName string
+
+	knownPeers    map[string]bool // host:port already announced in the log
+	lastLoggedSend string         // name of the in-flight send we already logged the start of
+	lastLoggedRecv string         // name of the in-flight receive we already logged the start of
 }
 
 // New builds the application window and wires the engine.
@@ -82,12 +86,10 @@ func New() *App {
 		identity: id,
 		disc:     disc,
 		xfer:     xfer,
-		recvLog: func() *widget.Entry {
-			e := widget.NewMultiLineEntry()
-			e.SetText("No activity yet")
-			e.Wrapping = fyne.TextWrapWord
-			e.Disable() // read-only activity log
-			return e
+		recvLog: func() *widget.Label {
+			l := widget.NewLabel("No activity yet")
+			l.Wrapping = fyne.TextWrapWord
+			return l
 		}(),
 		progress: widget.NewProgressBar(),
 		status:   widget.NewLabel("Starting…"),
@@ -97,6 +99,8 @@ func New() *App {
 		id.SetAutoAccept(on)
 	})
 	a.autoAccept.SetChecked(cfg.AutoAccept)
+
+	a.knownPeers = make(map[string]bool)
 
 	a.peerList = widget.NewList(
 		func() int { return len(a.peerData) },
@@ -188,8 +192,19 @@ func (a *App) sendTab() *container.TabItem {
 func (a *App) receiveTab() *container.TabItem {
 	var pause *widget.Button
 	pause = widget.NewButton("Pause listening", func() {
-		a.xfer.StopReceiver()
-		pause.SetText("Resume listening")
+		if pause.Text == "Pause listening" {
+			a.xfer.StopReceiver()
+			pause.SetText("Resume listening")
+			a.appendLog("Paused listening for incoming transfers")
+		} else {
+			if err := a.xfer.StartReceiver(protocol.TransferPort); err != nil {
+				a.appendLog("Could not resume listening: " + err.Error())
+				dialog.ShowError(err, a.window)
+				return
+			}
+			pause.SetText("Pause listening")
+			a.appendLog("Resumed listening for incoming transfers")
+		}
 	})
 	progressRow := container.NewVBox(widget.NewLabel("Progress"), a.progress)
 	logScroll := container.NewVScroll(a.recvLog)
@@ -327,6 +342,10 @@ func (a *App) drainEvents() {
 				a.setCancelSend(true)
 				a.progress.SetValue(frac)
 				a.status.SetText(fmt.Sprintf("Sending %s → %s", e.Name, e.Peer))
+				if a.lastLoggedSend != e.Name {
+					a.lastLoggedSend = e.Name
+					a.appendLog(fmt.Sprintf("Sending %s to %s", e.Name, e.Peer))
+				}
 			})
 		case "receive_progress":
 			frac := 0.0
@@ -338,39 +357,53 @@ func (a *App) drainEvents() {
 				a.setCancelRecv(true)
 				a.progress.SetValue(frac)
 				a.status.SetText(fmt.Sprintf("Receiving %s", e.Name))
+				if a.lastLoggedRecv != e.Name {
+					a.lastLoggedRecv = e.Name
+					a.appendLog(fmt.Sprintf("Receiving %s", e.Name))
+				}
 			})
 		case "sent":
 			fyne.Do(func() {
-				a.appendLog(fmt.Sprintf("Sent %s to %s", e.Name, e.Peer))
+				a.appendLog(fmt.Sprintf("Send completed: %s to %s", e.Name, e.Peer))
 				a.progress.SetValue(1)
 				a.status.SetText("Ready")
 				a.activeSendName = ""
+				a.lastLoggedSend = ""
 				a.setCancelSend(false)
 			})
 		case "received":
 			fyne.Do(func() {
-				a.appendLog(fmt.Sprintf("Received %s", e.Name))
+				a.appendLog(fmt.Sprintf("Received completely: %s", e.Name))
 				a.progress.SetValue(1)
 				a.status.SetText("Ready")
 				a.activeRecvName = ""
+				a.lastLoggedRecv = ""
 				a.setCancelRecv(false)
 			})
 		case "cancelled":
 			fyne.Do(func() {
-				a.appendLog(fmt.Sprintf("Cancelled %s", e.Name))
+				who := "Receiver"
+				if e.Peer == "Sender" {
+					who = "Sender"
+				}
+				a.appendLog(fmt.Sprintf("%s cancelled transfer of %s", who, e.Name))
 				a.progress.SetValue(0)
 				a.status.SetText("Ready")
 				a.activeSendName = ""
 				a.activeRecvName = ""
+				a.lastLoggedSend = ""
+				a.lastLoggedRecv = ""
 				a.setCancelSend(false)
 				a.setCancelRecv(false)
 			})
 		case "error":
 			fyne.Do(func() {
-				a.appendLog(fmt.Sprintf("Error: %s", e.Name))
+				a.appendLog(fmt.Sprintf("Error on %s", e.Name))
 				a.status.SetText("Ready")
 				a.activeSendName = ""
 				a.activeRecvName = ""
+				a.lastLoggedSend = ""
+				a.lastLoggedRecv = ""
 				a.setCancelSend(false)
 				a.setCancelRecv(false)
 			})
@@ -388,18 +421,31 @@ func (a *App) refreshPeersLoop() {
 
 func (a *App) refreshPeers() {
 	a.peerData = a.disc.Peers()
+	var newPeers []discovery.Peer
+	for _, p := range a.peerData {
+		key := p.Host + ":" + itoa(p.Port)
+		if !a.knownPeers[key] {
+			a.knownPeers[key] = true
+			newPeers = append(newPeers, p)
+		}
+	}
 	fyne.Do(func() {
 		a.peerList.Refresh()
 		a.status.SetText(fmt.Sprintf("Ready on port %d · %d device(s)", protocol.TransferPort, len(a.peerData)))
+		for _, p := range newPeers {
+			a.appendLog(fmt.Sprintf("Discovered peer %s (%s:%d)", p.Name, p.Host, p.Port))
+		}
 	})
 }
 
 func (a *App) appendLog(line string) {
+	ts := time.Now().Format("15:04:05")
+	entry := "[" + ts + "] " + line
 	current := a.recvLog.Text
 	if current == "No activity yet" || current == "" {
-		a.recvLog.SetText(line)
+		a.recvLog.SetText(entry)
 	} else {
-		a.recvLog.SetText(current + "\n" + line)
+		a.recvLog.SetText(current + "\n" + entry)
 	}
 }
 

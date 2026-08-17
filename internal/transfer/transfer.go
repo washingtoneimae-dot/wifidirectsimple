@@ -330,6 +330,12 @@ func createFolderArchive(folder, dst string) error {
 	})
 }
 func (m *Manager) StartReceiver(transferPort int) error {
+	m.mu.Lock()
+	if m.listener != nil {
+		m.mu.Unlock()
+		return nil // already listening
+	}
+	m.mu.Unlock()
 	ln, err := net.Listen("tcp", net.JoinHostPort("0.0.0.0", itoa(transferPort)))
 	if err != nil {
 		return err
@@ -353,6 +359,7 @@ func (m *Manager) StartReceiver(transferPort int) error {
 func (m *Manager) StopReceiver() {
 	m.mu.Lock()
 	ln := m.listener
+	m.listener = nil
 	m.mu.Unlock()
 	if ln != nil {
 		_ = ln.Close()

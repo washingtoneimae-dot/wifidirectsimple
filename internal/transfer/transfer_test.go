@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -204,4 +205,25 @@ func readDirNames(t *testing.T, dir string) []string {
 		names = append(names, e.Name())
 	}
 	return names
+}
+
+// TestPauseResumeReceiver verifies that stopping then restarting the
+// receiver re-binds the port and accepts a new connection.
+func TestPauseResumeReceiver(t *testing.T) {
+	const port = 45991
+	m := NewManager(t.TempDir(), true, 20*1024*1024*1024)
+	if err := m.StartReceiver(port); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	m.StopReceiver()
+	if err := m.StartReceiver(port); err != nil {
+		t.Fatalf("resume after stop: %v", err)
+	}
+	// The listener should be reachable again on the same port.
+	conn, err := net.DialTimeout("tcp", "127.0.0.1:"+itoa(port), 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("could not connect after resume: %v", err)
+	}
+	_ = conn.Close()
+	m.StopReceiver()
 }
