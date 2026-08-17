@@ -142,12 +142,15 @@ func (m *Manager) unregister(key string) {
 // SendFile transfers a single file to peer (host:port). The peer's accept
 // decision is made remotely; this side honors an "accepted:false" reply.
 func (m *Manager) SendFile(peerHost string, peerPort int, path string, senderName, senderFP string) error {
+	return m.sendFileWithName(peerHost, peerPort, path, filepath.Base(path), "file", senderName, senderFP)
+}
+
+func (m *Manager) sendFileWithName(peerHost string, peerPort int, path, displayName, transferType, senderName, senderFP string) error {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return err
 	}
 	size := fi.Size()
-	displayName := filepath.Base(path)
 
 	ctx, cancel := m.register(displayName, displayName)
 	defer m.unregister(displayName)
@@ -164,11 +167,11 @@ func (m *Manager) SendFile(peerHost string, peerPort int, path string, senderNam
 	_ = conn.SetDeadline(time.Now().Add(300 * time.Second))
 
 	offer := protocol.Header{
-		"magic":             protocol.Magic,
-		"type":              "file",
-		"name":              displayName,
-		"size":              size,
-		"sender":            senderName,
+		"magic":              protocol.Magic,
+		"type":               transferType,
+		"name":               displayName,
+		"size":               size,
+		"sender":             senderName,
 		"sender_fingerprint": senderFP,
 	}
 	if _, err := conn.Write(protocol.PackHeader(offer)); err != nil {
@@ -243,7 +246,66 @@ func (m *Manager) SendFile(peerHost string, peerPort int, path string, senderNam
 	return nil
 }
 
-// StartReceiver begins listening for incoming transfers on transferPort.
+// SendFolder zips the folder (forward-slash members, mirroring the Python
+// reference) and transfers it as a "folder" type.
+func (m *Manager) SendFolder(peerHost string, peerPort int, folder string, senderName, senderFP string) error {
+	archive, err := os.CreateTemp("", "peerdrop-folder-*.zip")
+	if err != nil {
+		return err
+	}
+	archivePath := archive.Name()
+	archive.Close()
+	defer os.Remove(archivePath)
+
+	if err := createFolderArchive(folder, archivePath); err != nil {
+		return err
+	}
+	return m.sendFileWithName(peerHost, peerPort, archivePath, filepath.Base(folder), "folder", senderName, senderFP)
+}
+
+// createFolderArchive writes folder to dst as a zip with POSIX (forward-slash)
+// member names, mirroring the Python create_folder_archive.
+func createFolderArchive(folder, dst string) error {
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	zw := zip.NewWriter(out)
+	defer zw.Close()
+
+	base := filepath.Clean(folder)
+	return filepath.Walk(folder, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(base, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		// Forward-slash member names (zip standard), matching Python as_posix().
+		rel = filepath.ToSlash(rel)
+		if info.IsDir() {
+			rel += "/"
+			_, err := zw.Create(rel)
+			return err
+		}
+		src, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+		w, err := zw.Create(rel)
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(w, src)
+		return err
+	})
+}
 func (m *Manager) StartReceiver(transferPort int) error {
 	ln, err := net.Listen("tcp", net.JoinHostPort("0.0.0.0", itoa(transferPort)))
 	if err != nil {
