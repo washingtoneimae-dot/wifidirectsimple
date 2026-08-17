@@ -61,6 +61,22 @@ func New() *App {
 	disc := discovery.NewService(id.Fingerprint(), id.Name(), protocol.DiscoveryPort)
 	xfer := transfer.NewManager(cfg.ReceiveDir, cfg.AutoAccept, protocol.AutoAcceptMax)
 
+	// When automatic acceptance is off, ask the user per transfer via a
+	// blocking Accept/Decline dialog instead of silently rejecting.
+	xfer.SetApproveHook(func(name string, size int64, sender string) bool {
+		decided := make(chan bool, 1)
+		fyne.Do(func() {
+			msg := fmt.Sprintf("Incoming %s from %s (%s)", name, sender, humanBytes(size))
+			d := dialog.NewConfirm("Incoming transfer", msg, func(ok bool) {
+				decided <- ok
+			}, w)
+			d.SetConfirmText("Accept")
+			d.SetDismissText("Decline")
+			d.Show()
+		})
+		return <-decided
+	})
+
 	a := &App{
 		fyneApp:  fa,
 		window:   w,
@@ -432,4 +448,18 @@ func itoa(n int) string {
 		b[i] = '-'
 	}
 	return string(b[i:])
+}
+
+// humanBytes formats a byte count for display in the approval dialog.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }

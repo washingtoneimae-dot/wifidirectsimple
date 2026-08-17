@@ -34,11 +34,34 @@ type Manager struct {
 	autoCap         int64
 	chunk           int // bytes per read/write; 0 means DefaultChunkSize
 
+	// approveHook, when set, is consulted for transfers that are NOT
+	// auto-accepted (auto-accept disabled or over the size cap). It blocks
+	// until the user decides and returns true to accept, false to decline.
+	// It is invoked on the receiver goroutine, so it must not deadlock with
+	// the UI main thread (a Fyne dialog callback is the intended use).
+	approveHook func(name string, size int64, sender string) bool
+
 	mu               sync.Mutex
 	active           map[string]*activeTransfer
 	events           chan Event
 	receiverEnabled  bool
 	listener         net.Listener
+}
+
+// SetApproveHook installs the per-transfer approval callback used when
+// automatic acceptance is disabled. When nil (default), non-auto-accepted
+// transfers are declined outright.
+func (m *Manager) SetApproveHook(fn func(name string, size int64, sender string) bool) {
+	m.mu.Lock()
+	m.approveHook = fn
+	m.mu.Unlock()
+}
+
+// AutoCap returns the current auto-accept size ceiling.
+func (m *Manager) AutoCap() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.autoCap
 }
 
 type activeTransfer struct {
@@ -351,15 +374,30 @@ func (m *Manager) handleIncoming(conn net.Conn) {
 	name, _ := offer["name"].(string)
 	sizeF, _ := offer["size"].(float64)
 	size := int64(sizeF)
+	sender, _ := offer["sender"].(string)
 
 	ctx, cancel := m.register(name, name)
 	defer m.unregister(name)
 	defer cancel()
 
-	// Accept automatically when enabled and within the size cap; otherwise
-	// decline. (A future GUI prompt path can inject a live decision here.)
-	if !(m.autoAccept && size <= m.autoCap) {
-		_ = writeReply(conn, protocol.Header{"accepted": false, "reason": "Not accepted"})
+	// Decide acceptance. Auto-accept (when enabled and within the cap)
+	// accepts immediately. Otherwise, if a live approval hook is installed
+	// (the GUI's Accept/Decline dialog), consult it. With no hook and no
+	// auto-accept, decline so the sender gets a clean rejection.
+	var accepted bool
+	if m.autoAccept && size <= m.autoCap {
+		accepted = true
+	} else {
+		m.mu.Lock()
+		hook := m.approveHook
+		m.mu.Unlock()
+		if hook != nil {
+			accepted = hook(name, size, sender)
+		}
+	}
+	if !accepted {
+		_ = writeReply(conn, protocol.Header{"accepted": false, "reason": "Declined by user"})
+		m.emit(Event{Kind: "error", Name: name, Peer: sender, Current: 0, Total: size})
 		return
 	}
 	if _, err := conn.Write(protocol.PackHeader(protocol.Header{"accepted": true})); err != nil {
