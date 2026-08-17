@@ -1,0 +1,17 @@
+# Build / OS artifacts
+/dist/
+/pkg/
+*.deb
+
+# Go
+*.test
+*.out
+
+# Local probe / test scratch (not part of the project)
+/tmp/
+probe*.py
+py_recv_probe.py
+
+# Editor / OS
+.DS_Store
+__pycache__/

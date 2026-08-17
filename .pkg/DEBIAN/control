@@ -1,0 +1,18 @@
+Package: peerdrop-go
+Version: 1.0.0
+Section: net
+Priority: optional
+Architecture: amd64
+Depends: 
+Recommends: gnome-control-center
+Maintainer: washingtoneimae <washingtoneimae@gmail.com>
+Description: PeerDrop LAN (Go) - send files directly between PCs on a local network
+ PeerDrop LAN is a small desktop app for sending files and folders directly
+ between computers on the same Wi-Fi, Ethernet, or mobile hotspot - no cloud,
+ no account, no internet upload. Files transfer over your local network only.
+ .
+ Features:
+  - Discover nearby PCs automatically on the LAN
+  - Send files or whole folders to one or many PCs at once
+  - Cancel an in-progress transfer from either the sender or receiver
+  - Wire-compatible with the Python and Windows versions of PeerDrop LAN
