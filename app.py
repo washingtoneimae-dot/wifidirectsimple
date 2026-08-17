@@ -685,11 +685,20 @@ class NetworkService:
             self.events.put(("cancelled", request["name"], "Receiver"))
         except Exception as error:
             self._cleanup_partial(destination, archive_path)
-            try:
-                conn.sendall(pack_header({"completed": False, "reason": str(error)}))
-            except OSError:
-                pass
-            self.events.put(("error", f"Receiving {request['name']} failed: {error}"))
+            # If a cancel was requested (by either side) a disconnect is expected,
+            # not a failure -- report it as a cancellation, not a scary error.
+            if cancel.is_set():
+                try:
+                    conn.sendall(pack_header({"completed": False, "reason": "Cancelled by receiver"}))
+                except OSError:
+                    pass
+                self.events.put(("cancelled", request["name"], "Receiver"))
+            else:
+                try:
+                    conn.sendall(pack_header({"completed": False, "reason": str(error)}))
+                except OSError:
+                    pass
+                self.events.put(("error", f"Receiving {request['name']} failed: {error}"))
         finally:
             with self.active_lock:
                 self.active_transfers.pop(token, None)
@@ -1035,23 +1044,26 @@ class PeerDropApp:
     def open_hotspot_settings(self) -> None:
         # There is no single standard hotspot URI across desktops. On GNOME
         # (the common Ubuntu desktop) the control-center wifi panel is the right
-        # place to turn on the mobile hotspot; fall back to a portal/URI opener.
-        launched = False
-        try:
-            if subprocess.run(["gnome-control-center", "wifi"], check=False, timeout=3).returncode == 0:
-                launched = True
-        except (OSError, subprocess.SubprocessError):
-            pass
-        if not launched:
-            for target in ("network", "settings://network"):
-                try:
-                    if subprocess.run(["xdg-open", target], check=False, timeout=3).returncode == 0:
-                        launched = True
-                        break
-                except (OSError, subprocess.SubprocessError):
-                    continue
-        if not launched:
-            messagebox.showinfo(APP_NAME, "Open your desktop's Wi-Fi / hotspot settings to share this connection.")
+        # place to turn on the mobile hotspot. We just open it and get out of the
+        # way -- no follow-up dialog, since the settings window is the instruction.
+        for command in (["gnome-control-center", "wifi"], ["gnome-control-center", "network"]):
+            try:
+                proc = subprocess.Popen(command)
+                # If it spawned at all, the user now has the settings window open.
+                if proc.pid:
+                    return
+            except OSError:
+                continue
+        # Last resort for non-GNOME desktops.
+        for target in ("network", "settings://network"):
+            try:
+                proc = subprocess.Popen(["xdg-open", target])
+                if proc.pid:
+                    return
+            except OSError:
+                continue
+        # Only if nothing could be launched at all do we tell the user.
+        messagebox.showinfo(APP_NAME, "Open your desktop's Wi-Fi / hotspot settings to share this connection.")
 
     def pick_and_send(self) -> None:
         selected = self.tree.selection()
