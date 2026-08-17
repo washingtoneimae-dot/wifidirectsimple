@@ -165,7 +165,12 @@ func TestApprovalHookAcceptsAndDeclines(t *testing.T) {
 
 	// Case 2: hook declines -> sender gets an error.
 	recv.StopReceiver()
-	// Fresh receiver with a declining hook.
+	// Fresh receiver with a declining hook. Use a distinct file so it is
+	// not treated as a duplicate of the one saved in Case 1.
+	declineSrc := filepath.Join(srcDir, "note-decline.txt")
+	if err := os.WriteFile(declineSrc, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	recv2 := NewManager(receiveDir, false, 0)
 	recv2.SetChunk(4096)
 	declined := make(chan struct{}, 1)
@@ -179,7 +184,7 @@ func TestApprovalHookAcceptsAndDeclines(t *testing.T) {
 	defer recv2.StopReceiver()
 
 	before := len(readDirNames(t, receiveDir))
-	err = send.SendFile("127.0.0.1", transferPort, src, "Test PC", "sender-fp")
+	err = send.SendFile("127.0.0.1", transferPort, declineSrc, "Test PC", "sender-fp")
 	if err == nil {
 		t.Fatal("expected declined transfer to error, got nil")
 	}
@@ -207,7 +212,67 @@ func readDirNames(t *testing.T, dir string) []string {
 	return names
 }
 
-// TestPauseResumeReceiver verifies that stopping then restarting the
+// TestDuplicateSendIsSkipped verifies that re-sending an identical file
+// (same name + size) already present in the receive dir is declined
+// before download, so copies don't accumulate.
+func TestDuplicateSendIsSkipped(t *testing.T) {
+	dir := t.TempDir()
+	receiveDir := filepath.Join(dir, "received")
+	srcDir := filepath.Join(dir, "src")
+	_ = os.MkdirAll(receiveDir, 0o755)
+	_ = os.MkdirAll(srcDir, 0o755)
+
+	payload := []byte("duplicate guard payload")
+	src := filepath.Join(srcDir, "dup.txt")
+	if err := os.WriteFile(src, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const transferPort = 47998
+	m := NewManager(receiveDir, false, 0)
+	m.SetChunk(4096)
+	gotHook := make(chan string, 1)
+	m.SetApproveHook(func(name string, size int64, sender string) bool {
+		gotHook <- name
+		return true
+	})
+	if err := m.StartReceiver(transferPort); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer m.StopReceiver()
+
+	send := NewManager(receiveDir, false, 0)
+	send.SetChunk(4096)
+
+	// First send: should be accepted and saved.
+	if err := send.SendFile("127.0.0.1", transferPort, src, "Peer", "fp"); err != nil {
+		t.Fatalf("first send failed: %v", err)
+	}
+	select {
+	case <-gotHook:
+	case <-time.After(5 * time.Second):
+		t.Fatal("hook not consulted on first send")
+	}
+	if _, err := os.Stat(filepath.Join(receiveDir, "dup.txt")); err != nil {
+		t.Fatalf("first file not saved: %v", err)
+	}
+
+	// Second send of the same file: should be skipped (duplicate), hook
+	// must NOT be consulted and no second copy written. The sender gets a
+	// clean "Already received" rejection.
+	if err := send.SendFile("127.0.0.1", transferPort, src, "Peer", "fp"); err == nil {
+		t.Fatalf("expected duplicate send to be rejected, got nil")
+	}
+	select {
+	case n := <-gotHook:
+		t.Fatalf("duplicate was not skipped, hook consulted for %q", n)
+	case <-time.After(1 * time.Second):
+	}
+	// Exactly one file should exist.
+	if got := len(readDirNames(t, receiveDir)); got != 1 {
+		t.Fatalf("expected 1 file after duplicate send, got %d", got)
+	}
+}
 // receiver re-binds the port and accepts a new connection.
 func TestPauseResumeReceiver(t *testing.T) {
 	const port = 45991

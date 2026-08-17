@@ -387,6 +387,16 @@ func (m *Manager) handleIncoming(conn net.Conn) {
 	defer m.unregister(name)
 	defer cancel()
 
+	// Duplicate guard: if an identical file (same name and size) already
+	// sits in the receive folder, decline without downloading. This
+	// prevents disk-fill from a peer that repeatedly re-sends the same
+	// file (e.g. on every discovery), while keeping the copy you have.
+	if m.duplicateExists(name, size) {
+		_ = writeReply(conn, protocol.Header{"accepted": false, "reason": "Already received"})
+		m.emit(Event{Kind: "skipped", Name: name, Peer: sender, Current: 0, Total: size})
+		return
+	}
+
 	// Decide acceptance. Auto-accept (when enabled and within the cap)
 	// accepts immediately. Otherwise, if a live approval hook is installed
 	// (the GUI's Accept/Decline dialog), consult it. With no hook and no
@@ -508,6 +518,18 @@ func uniqueDestination(dir, name string) string {
 			return candidate
 		}
 	}
+}
+
+// duplicateExists reports whether an identical file (same name and byte
+// size) is already present in dir, so repeated sends can be skipped
+// instead of accumulating copies.
+func (m *Manager) duplicateExists(name string, size int64) bool {
+	candidate := filepath.Join(m.receiveDir, name)
+	fi, err := os.Stat(candidate)
+	if err != nil {
+		return false
+	}
+	return fi.Size() == size
 }
 
 func cleanupPartial(path string, isDir bool) {

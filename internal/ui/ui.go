@@ -396,6 +396,11 @@ func (a *App) drainEvents() {
 				a.setCancelSend(false)
 				a.setCancelRecv(false)
 			})
+		case "skipped":
+			fyne.Do(func() {
+				a.appendLog(fmt.Sprintf("Skipped duplicate (already have): %s", e.Name))
+				a.status.SetText("Ready")
+			})
 		case "error":
 			fyne.Do(func() {
 				a.appendLog(fmt.Sprintf("Error on %s", e.Name))
