@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from app import (AUTO_ACCEPT_MAX_SIZE, CHUNK_SIZES, MAX_FILE_SIZE, NetworkService, TRANSFER_PORT, directed_broadcast,
-                 next_automatic_chunk, pack_header, parse_ipconfig_interfaces, parse_wifi_status, preferred_address,
+                 next_automatic_chunk, pack_header, parse_linux_interfaces, preferred_address,
                  recv_header, safe_filename, should_auto_accept, stable_fingerprint, unique_destination, wifi_first_address)
 
 
@@ -27,9 +27,23 @@ class ProtocolTests(unittest.TestCase):
         folder = Path(self._testMethodName)
         self.assertEqual(unique_destination(folder, "same.txt").name, "same.txt")
 
-    def test_wifi_status_parser(self):
-        state, ssid = parse_wifi_status("    State                  : connected\n    SSID                   : Office WiFi\n")
-        self.assertEqual((state, ssid), ("Connected", "Office WiFi"))
+    def test_linux_interface_parser(self):
+        interfaces = parse_linux_interfaces("""\
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536
+    inet 127.0.0.1/8 scope host lo
+2: wlp0s20f3: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500
+    inet 192.168.1.44/24 brd 192.168.1.255 scope global dynamic
+3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500
+    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0
+""")
+        by_name = {i["name"]: i for i in interfaces}
+        self.assertEqual(by_name["wlp0s20f3"]["address"], "192.168.1.44")
+        self.assertEqual(by_name["wlp0s20f3"]["mask"], "255.255.255.0")
+        self.assertEqual(by_name["docker0"]["mask"], "255.255.0.0")
+        # loopback is parsed but carries a 127.x address (filtered out by callers)
+        self.assertEqual(by_name["lo"]["address"], "127.0.0.1")
+        # wifi_first_address skips loopback and prefers the Wi-Fi adapter
+        self.assertEqual(wifi_first_address(interfaces), ("192.168.1.44", 1))
 
     def test_prefers_private_lan_ip(self):
         self.assertEqual(preferred_address(["100.64.1.4", "192.168.0.33", "127.0.0.1"]), ("192.168.0.33", 1))
@@ -139,15 +153,15 @@ class ProtocolTests(unittest.TestCase):
         self.assertFalse(should_auto_accept(False, 1))
 
     def test_wifi_adapter_beats_virtual_adapter(self):
-        interfaces = parse_ipconfig_interfaces("""
-Ethernet adapter vEthernet (WSL):
-   IPv4 Address. . . . . . . . . . . : 172.22.16.1
-   Subnet Mask . . . . . . . . . . . : 255.255.240.0
-Wireless LAN adapter Wi-Fi:
-   IPv4 Address. . . . . . . . . . . : 192.168.1.44
-   Subnet Mask . . . . . . . . . . . : 255.255.255.0
+        interfaces = parse_linux_interfaces("""\
+1: br-0123456789ab: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500
+    inet 172.18.0.1/16 brd 172.18.255.255 scope global br-0123456789ab
+2: wlp0s20f3: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500
+    inet 192.168.1.44/24 brd 192.168.1.255 scope global dynamic wlp0s20f3
+3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500
+    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0
 """)
-        self.assertEqual(wifi_first_address(interfaces), ("192.168.1.44", 1))
+        self.assertEqual(wifi_first_address(interfaces), ("192.168.1.44", 2))
         self.assertEqual(directed_broadcast("192.168.1.44", "255.255.255.0"), "192.168.1.255")
 
     def test_approved_loopback_transfer(self):

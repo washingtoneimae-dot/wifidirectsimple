@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import hashlib
 import os
-import sys
 import queue
 import re
 import shutil
@@ -36,10 +35,7 @@ AUTO_ACCEPT_MAX_SIZE = 20 * 1024 * 1024 * 1024
 MAX_PENDING_REQUESTS = 10
 CHUNK_SIZE = 256 * 1024
 CHUNK_SIZES = (64 * 1024, 128 * 1024, 256 * 1024, 512 * 1024, 1024 * 1024)
-if os.name == "nt":
-    SETTINGS_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "PeerDropLAN"
-else:
-    SETTINGS_DIR = Path.home() / ".config" / "PeerDropLAN"
+SETTINGS_DIR = Path.home() / ".config" / "PeerDropLAN"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 
 
@@ -167,20 +163,6 @@ def format_size(size: int) -> str:
     return f"{size} B"
 
 
-def parse_wifi_status(netsh_output: str) -> tuple[str, str]:
-    """Return Windows netsh Wi-Fi connection state and SSID without shell parsing."""
-    state = "Unavailable"
-    ssid = ""
-    for line in netsh_output.splitlines():
-        match = re.match(r"^\s*State\s*:\s*(.+)$", line, re.IGNORECASE)
-        if match:
-            state = match.group(1).strip().title()
-        match = re.match(r"^\s*SSID\s*:\s*(.+)$", line, re.IGNORECASE)
-        if match and not line.lstrip().lower().startswith("bssid"):
-            ssid = match.group(1).strip()
-    return state, ssid
-
-
 def preferred_address(addresses: list[str]) -> tuple[str | None, int]:
     """Prefer a normal home/office LAN address over VPN and virtual adapters."""
     usable = [address for address in addresses if not address.startswith(("127.", "169.254."))]
@@ -191,27 +173,6 @@ def preferred_address(addresses: list[str]) -> tuple[str | None, int]:
             private.append(address)
     candidates = private or usable
     return (candidates[0], len(usable) - 1) if candidates else (None, 0)
-
-
-def parse_ipconfig_interfaces(ipconfig_output: str) -> list[dict]:
-    """Extract adapter names, IPv4 addresses and masks from Windows ipconfig output."""
-    interfaces: list[dict] = []
-    current: dict | None = None
-    for line in ipconfig_output.splitlines():
-        heading = re.match(r"^\s*(?:Wireless LAN|Ethernet|Unknown|PPP) adapter (.+):\s*$", line, re.IGNORECASE)
-        if heading:
-            current = {"name": heading.group(1).strip(), "address": None, "mask": None}
-            interfaces.append(current)
-            continue
-        if not current:
-            continue
-        address = re.search(r"IPv4[^:]*:\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})", line, re.IGNORECASE)
-        if address:
-            current["address"] = address.group(1)
-        mask = re.search(r"Subnet Mask[^:]*:\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})", line, re.IGNORECASE)
-        if mask:
-            current["mask"] = mask.group(1)
-    return [item for item in interfaces if item["address"]]
 
 
 def is_private_address(address: str) -> bool:
@@ -228,12 +189,19 @@ def directed_broadcast(address: str, mask: str) -> str | None:
         return None
 
 
+def _looks_like_wifi(name: str) -> bool:
+    lowered = name.lower()
+    if any(word in lowered for word in ("wi-fi", "wifi", "wireless", "wlan")):
+        return True
+    # Standard Linux Wi-Fi interface naming (e.g. wlp2s0, wlan0, wifi0).
+    return bool(re.match(r"^(wlp|wlan|wifi)\d", lowered))
+
+
 def wifi_first_address(interfaces: list[dict]) -> tuple[str | None, int]:
     usable = [item for item in interfaces if not item["address"].startswith(("127.", "169.254."))]
-    wifi = [item for item in usable if any(word in item["name"].lower() for word in ("wi-fi", "wifi", "wireless", "wlan"))]
-    hotspot = [item for item in usable if "local area connection*" in item["name"].lower()]
+    wifi = [item for item in usable if _looks_like_wifi(item["name"])]
     private = [item for item in usable if is_private_address(item["address"])]
-    choice = (wifi or hotspot or private or usable)
+    choice = (wifi or private or usable)
     return (choice[0]["address"], len(usable) - 1) if choice else (None, 0)
 
 
@@ -262,11 +230,6 @@ def parse_linux_interfaces(ip_addr_output: str) -> list[dict]:
     return interfaces
 
 
-def is_linux() -> bool:
-    """True when running on a non-Windows platform (Linux/macOS/other)."""
-    return sys.platform != "win32"
-
-
 def linux_interfaces() -> list[dict]:
     """Current IPv4 interfaces on Linux via the `ip` command."""
     try:
@@ -289,32 +252,11 @@ def linux_wifi_ssid(primary_interface: str) -> str:
 
 def network_summary() -> str:
     """Collect a useful local-network status while still allowing wired connections."""
-    if is_linux():
-        interfaces = linux_interfaces()
-        primary, additional_count = wifi_first_address(interfaces)
-        wifi_state = "Connected" if primary else "Unavailable"
-        ssid = linux_wifi_ssid(primary) if primary else ""
-        wifi_text = f"Wi-Fi: {wifi_state}" + (f" ({ssid})" if ssid else "")
-        address_text = primary or "No local IPv4 address detected"
-        if primary and additional_count:
-            address_text += f"  (+{additional_count} other adapter address{'es' if additional_count != 1 else ''})"
-        return f"{wifi_text}  |  This PC IP: {address_text}"
-
-    try:
-        result = subprocess.run(["netsh", "wlan", "show", "interfaces"], capture_output=True,
-                                text=True, encoding="utf-8", errors="replace", timeout=4, check=False)
-        wifi_state, ssid = parse_wifi_status(result.stdout)
-    except (OSError, subprocess.SubprocessError):
-        wifi_state, ssid = "Unavailable", ""
-    interfaces: list[dict] = []
-    try:
-        result = subprocess.run(["ipconfig"], capture_output=True, text=True, encoding="utf-8",
-                                errors="replace", timeout=4, check=False)
-        interfaces = parse_ipconfig_interfaces(result.stdout)
-    except (OSError, subprocess.SubprocessError):
-        pass
+    interfaces = linux_interfaces()
     primary, additional_count = wifi_first_address(interfaces)
-    wifi_text = f"Wi-Fi: {wifi_state}" + (f" ({ssid})" if ssid and wifi_state.lower() == "connected" else "")
+    wifi_state = "Connected" if primary else "Unavailable"
+    ssid = linux_wifi_ssid(primary) if primary else ""
+    wifi_text = f"Wi-Fi: {wifi_state}" + (f" ({ssid})" if ssid else "")
     address_text = primary or "No local IPv4 address detected"
     if primary and additional_count:
         address_text += f"  (+{additional_count} other adapter address{'es' if additional_count != 1 else ''})"
@@ -323,23 +265,8 @@ def network_summary() -> str:
 
 def local_broadcast_targets() -> list[tuple[str, str]]:
     """Give each private adapter a directed broadcast, avoiding a wrong default route."""
-    if is_linux():
-        targets = []
-        for interface in linux_interfaces():
-            address, mask = interface["address"], interface["mask"]
-            broadcast = directed_broadcast(address, mask) if mask and is_private_address(address) else None
-            if broadcast:
-                targets.append((address, broadcast))
-        return list(dict.fromkeys(targets))
-
-    try:
-        result = subprocess.run(["ipconfig"], capture_output=True, text=True, encoding="utf-8",
-                                errors="replace", timeout=4, check=False)
-        interfaces = parse_ipconfig_interfaces(result.stdout)
-    except (OSError, subprocess.SubprocessError):
-        return []
     targets = []
-    for interface in interfaces:
+    for interface in linux_interfaces():
         address, mask = interface["address"], interface["mask"]
         broadcast = directed_broadcast(address, mask) if mask and is_private_address(address) else None
         if broadcast:
@@ -984,14 +911,8 @@ class PeerDropApp:
             self.chunk_text.set("Automatic (recommended)" if self.service.chunk_size is None else f"{self.service.chunk_size // 1024} KB")
 
     def open_hotspot_settings(self) -> None:
-        if sys.platform == "win32":
-            try:
-                os.startfile("ms-settings:network-mobilehotspot")
-            except OSError as error:
-                messagebox.showerror(APP_NAME, f"Could not open Windows Mobile Hotspot settings: {error}")
-            return
-        # On Linux/macOS there is no single standard hotspot URI; let the desktop
-        # environment handle it and just point the user in the right direction.
+        # There is no single standard hotspot URI across desktops; point the user
+        # to their network settings and let the environment handle opening it.
         try:
             subprocess.run(["xdg-open", "settings://network"], check=False, timeout=3)
         except (OSError, subprocess.SubprocessError):
