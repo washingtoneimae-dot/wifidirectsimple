@@ -8,7 +8,8 @@ from pathlib import Path
 
 from app import (AUTO_ACCEPT_MAX_SIZE, CHUNK_SIZES, MAX_FILE_SIZE, NetworkService, TRANSFER_PORT, directed_broadcast,
                  next_automatic_chunk, pack_header, parse_ipconfig_interfaces, parse_wifi_status, preferred_address,
-                 recv_header, safe_filename, should_auto_accept, stable_fingerprint, unique_destination, wifi_first_address)
+                 recv_header, safe_extract_archive, safe_filename, should_auto_accept, stable_fingerprint,
+                 unique_destination, wifi_first_address)
 
 
 class ProtocolTests(unittest.TestCase):
@@ -284,6 +285,58 @@ Wireless LAN adapter Wi-Fi:
                         self.fail(event[1])
                 self.assertTrue(received, "Folder contents were not restored")
                 self.assertTrue(sent, "Folder sender did not finish")
+            finally:
+                service.stop()
+
+
+    def test_sender_can_cancel_active_transfer(self):
+        """A sender-triggered cancel stops the transfer and cleans up."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "big.bin"
+            payload = b"x" * (5 * 1024 * 1024)  # 5 MB so it spans many chunks
+            source.write_bytes(payload)
+            events = queue.Queue()
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.bind(("127.0.0.1", 0))
+                test_port = probe.getsockname()[1]
+            service = NetworkService(events, "Test PC", root / "received", transfer_port=test_port)
+            service.broadcast_enabled = False
+            service.set_auto_accept(True)
+            service.start()
+            try:
+                deadline = time.time() + 3
+                while time.time() < deadline:
+                    try:
+                        if events.get(timeout=.1)[0] == "status":
+                            break
+                    except queue.Empty:
+                        pass
+                else:
+                    self.fail("Transfer listener did not start")
+                service.peers["self"] = {"id": "self", "name": "Test PC", "host": "127.0.0.1",
+                                         "port": test_port, "seen": time.time()}
+                service.send_file("self", source)
+                saw_progress = False
+                deadline = time.time() + 5
+                while time.time() < deadline:
+                    try:
+                        event = events.get(timeout=.1)
+                    except queue.Empty:
+                        continue
+                    if event[0] == "receive_progress":
+                        saw_progress = True
+                        self.assertTrue(service.cancel_transfer(source.name), "cancel_transfer found the transfer")
+                    elif event[0] == "cancelled":
+                        break
+                    elif event[0] == "error":
+                        self.fail(event[1])
+                else:
+                    self.fail("Transfer was neither cancelled nor errored")
+                self.assertTrue(saw_progress, "Receiver began saving before cancel")
+                time.sleep(0.5)
+                received = sorted((root / "received").glob("*"))
+                self.assertEqual(received, [], f"partial file left after cancel: {received}")
             finally:
                 service.stop()
 

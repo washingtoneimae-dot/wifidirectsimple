@@ -316,6 +316,10 @@ class NetworkService:
         self.receiver_enabled = threading.Event()
         self.receiver_enabled.set()
         self.server: socket.socket | None = None
+        # Active transfers keyed by a stable key (token or display name).
+        # Each value holds a cancel Event the worker loop checks between chunks.
+        self.active_transfers: dict[str, dict] = {}
+        self.active_lock = threading.Lock()
 
     def start(self) -> None:
         threading.Thread(target=self._announce_loop, daemon=True, name="discovery").start()
@@ -603,11 +607,45 @@ class NetworkService:
             return
         threading.Thread(target=self._save_received_transfer, args=(request,), daemon=True).start()
 
+    def cancel_transfer(self, identifier: str) -> bool:
+        """Cancel an active (or pending) transfer by its token or display name.
+
+        Returns True if at least one matching transfer was signalled to stop.
+        A single transfer has two sides (sender and receiver); cancelling by name
+        stops every side that matches, so either party can abort the exchange.
+        """
+        lowered = identifier.lower()
+        with self.active_lock:
+            matches = [
+                entry for key, entry in self.active_transfers.items()
+                if key.lower() == lowered or entry.get("name", "").lower() == lowered
+            ]
+            if not matches:
+                return False
+            for entry in matches:
+                entry["cancel"].set()
+            for entry in matches:
+                token = entry.get("token")
+                if token and token in self.pending:
+                    with self.pending_lock:
+                        request = self.pending.pop(token, None)
+                    if request:
+                        try:
+                            request["conn"].sendall(pack_header({"accepted": False, "reason": "Cancelled"}))
+                            request["conn"].close()
+                        except OSError:
+                            pass
+            return True
+
     def _save_received_transfer(self, request: dict) -> None:
         conn, size = request["conn"], request["size"]
         chunk_size = self.chunk_size or CHUNK_SIZE
         destination: Path | None = None
         archive_path: Path | None = None
+        cancel = threading.Event()
+        token = request.get("token", request["name"])
+        with self.active_lock:
+            self.active_transfers[token] = {"cancel": cancel, "name": request["name"], "direction": "receive", "token": token}
         try:
             self.receive_folder.mkdir(parents=True, exist_ok=True)
             if request["transfer_type"] == "folder":
@@ -621,6 +659,8 @@ class NetworkService:
             received = 0
             with open(write_path, "wb") as stream:
                 while received < size:
+                    if cancel.is_set():
+                        raise InterruptedError("Receiver cancelled the transfer")
                     block = conn.recv(min(chunk_size, size - received))
                     if not block:
                         raise ConnectionError("Sender disconnected")
@@ -632,24 +672,35 @@ class NetworkService:
                 archive_path.unlink(missing_ok=True)
             conn.sendall(pack_header({"completed": True}))
             self.events.put(("received", destination))
+        except InterruptedError:
+            self._cleanup_partial(destination, archive_path)
+            try:
+                conn.sendall(pack_header({"completed": False, "reason": "Cancelled by receiver"}))
+            except OSError:
+                pass
+            self.events.put(("cancelled", request["name"], "Receiver"))
         except Exception as error:
-            if destination and destination.exists():
-                try:
-                    if destination.is_dir():
-                        shutil.rmtree(destination)
-                    else:
-                        destination.unlink()
-                except OSError:
-                    pass
-            if archive_path:
-                archive_path.unlink(missing_ok=True)
+            self._cleanup_partial(destination, archive_path)
             try:
                 conn.sendall(pack_header({"completed": False, "reason": str(error)}))
             except OSError:
                 pass
             self.events.put(("error", f"Receiving {request['name']} failed: {error}"))
         finally:
+            with self.active_lock:
+                self.active_transfers.pop(token, None)
             conn.close()
+
+    def _cleanup_partial(self, destination: Path | None, archive_path: Path | None) -> None:
+        for path in (destination, archive_path):
+            if path and path.exists():
+                try:
+                    if path.is_dir():
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink()
+                except OSError:
+                    pass
 
     def send_file(self, peer_id: str, path: Path) -> None:
         peer = self.peers.get(peer_id)
@@ -679,6 +730,10 @@ class NetworkService:
                 archive_path.unlink(missing_ok=True)
 
     def _send_transfer_worker(self, peer: dict, path: Path, transfer_type: str, display_name: str) -> None:
+        cancel = threading.Event()
+        with self.active_lock:
+            self.active_transfers[display_name] = {"cancel": cancel, "name": display_name,
+                                                   "direction": "send", "peer": peer.get("name", "")}
         try:
             size = path.stat().st_size
             automatic_chunking = self.chunk_size is None
@@ -690,10 +745,13 @@ class NetworkService:
                                           "sender": self.device_name, "sender_fingerprint": self.id}))
                 reply = recv_header(sock)
                 if not reply.get("accepted"):
-                    raise PermissionError(reply.get("reason", "Transfer declined"))
+                    reason = reply.get("reason", "Transfer declined")
+                    raise PermissionError(reason)
                 sent = 0
                 with open(path, "rb") as stream:
                     while block := stream.read(chunk_size):
+                        if cancel.is_set():
+                            raise InterruptedError("Sender cancelled the transfer")
                         started = time.monotonic()
                         sock.sendall(block)
                         if automatic_chunking:
@@ -705,8 +763,13 @@ class NetworkService:
                 if not confirmation.get("completed"):
                     raise IOError(confirmation.get("reason", "Receiver did not confirm the saved file"))
             self.events.put(("sent", display_name, peer["name"]))
+        except InterruptedError:
+            self.events.put(("cancelled", display_name, "Sender"))
         except Exception as error:
             self.events.put(("error", f"Sending {display_name} failed: {error}"))
+        finally:
+            with self.active_lock:
+                self.active_transfers.pop(display_name, None)
 
 
 class PeerDropApp:
@@ -741,6 +804,8 @@ class PeerDropApp:
         self.network_text = StringVar(value="Checking network…")
         self.receiver_text = StringVar(value="Receiver is starting…")
         self.progress_text = StringVar(value="No active transfer")
+        self.active_send_name: str | None = None
+        self.active_receive_name: str | None = None
         self.auto_accept = BooleanVar(value=False)
         self.service = NetworkService(self.events, self.device_name.get(), self.folder, device_id=device_id,
                                       chunk_size=None if self.chunk_size == "auto" else self.chunk_size)
@@ -818,6 +883,9 @@ class PeerDropApp:
         ttk.Button(actions, text="Send file to selected PCs…", command=self.pick_and_send).pack(side="right")
         ttk.Button(actions, text="Send folder…", command=self.pick_and_send_folder).pack(side="right", padx=(0, 8))
         ttk.Label(actions, textvariable=self.progress_text).pack(side="right", padx=15)
+        self.send_cancel_btn = ttk.Button(actions, text="Cancel send", state="disabled",
+                                           command=self.cancel_active_send)
+        self.send_cancel_btn.pack(side="right", padx=(0, 8))
         self.progress = ttk.Progressbar(self.send_tab, mode="determinate", maximum=100)
         self.progress.pack(fill="x", pady=(0, 12))
 
@@ -833,6 +901,9 @@ class PeerDropApp:
         ttk.Button(receive_settings, text="Choose folder", command=self.choose_folder).grid(row=0, column=2)
         ttk.Checkbutton(receive_settings, text="Accept transfers automatically (up to 20 GB)", variable=self.auto_accept,
                         command=self.update_auto_accept).grid(row=1, column=1, sticky="w", padx=8, pady=(6, 0))
+        self.recv_cancel_btn = ttk.Button(receive_settings, text="Cancel current transfer", state="disabled",
+                                          command=self.cancel_active_receive)
+        self.recv_cancel_btn.grid(row=2, column=1, sticky="w", padx=8, pady=(6, 0))
         activity = ttk.LabelFrame(self.receive_tab, text="Transfer activity", padding=8)
         activity.pack(fill="both", expand=True)
         self.activity = ttk.Treeview(activity, columns=("time", "state", "details"), show="headings", height=4)
@@ -928,6 +999,20 @@ class PeerDropApp:
         except (ValueError, IndexError):
             self.chunk_text.set("Automatic (recommended)" if self.service.chunk_size is None else f"{self.service.chunk_size // 1024} KB")
 
+    def cancel_active_send(self) -> None:
+        name = self.active_send_name
+        if name and self.service.cancel_transfer(name):
+            self._add_activity("Cancelling", f"Stopping send of {name}")
+        else:
+            self._add_activity("Cancel", "No active send to cancel")
+
+    def cancel_active_receive(self) -> None:
+        name = self.active_receive_name
+        if name and self.service.cancel_transfer(name):
+            self._add_activity("Cancelling", f"Stopping receive of {name}")
+        else:
+            self._add_activity("Cancel", "No active receive to cancel")
+
     def open_hotspot_settings(self) -> None:
         try:
             os.startfile("ms-settings:network-mobilehotspot")
@@ -960,6 +1045,12 @@ class PeerDropApp:
         percent = 100 if total == 0 else current * 100 / total
         self.progress["value"] = percent
         self.progress_text.set(f"{prefix} {filename}: {format_size(current)} / {format_size(total)}")
+        if prefix.startswith("Sending"):
+            self.active_send_name = filename
+            self.send_cancel_btn.configure(state="normal")
+        elif prefix.startswith("Receiving"):
+            self.active_receive_name = filename
+            self.recv_cancel_btn.configure(state="normal")
 
     def _add_activity(self, state: str, details: str) -> None:
         self.activity.insert("", 0, values=(time.strftime("%H:%M:%S"), state, details))
@@ -994,11 +1085,25 @@ class PeerDropApp:
                 elif kind == "sent":
                     self.progress["value"] = 100; self.progress_text.set(f"Sent {event[1]} to {event[2]}")
                     self._add_activity("Sent", f"{event[1]} to {event[2]}")
+                    self.active_send_name = None
+                    self.send_cancel_btn.configure(state="disabled")
                     messagebox.showinfo(APP_NAME, f"Sent {event[1]} to {event[2]}.")
                 elif kind == "received":
                     self.progress["value"] = 100; self.progress_text.set(f"Received {event[1].name}")
                     self._add_activity("Received", f"{event[1].name} saved to {event[1]}")
+                    self.active_receive_name = None
+                    self.recv_cancel_btn.configure(state="disabled")
                     messagebox.showinfo(APP_NAME, f"Saved file to:\n{event[1]}")
+                elif kind == "cancelled":
+                    self.progress["value"] = 0
+                    self.progress_text.set(f"Cancelled {event[1]} ({event[2]})")
+                    self._add_activity("Cancelled", f"{event[1]} ({event[2]})")
+                    if event[2] == "Sender":
+                        self.active_send_name = None
+                        self.send_cancel_btn.configure(state="disabled")
+                    else:
+                        self.active_receive_name = None
+                        self.recv_cancel_btn.configure(state="disabled")
                 elif kind == "incoming": self._incoming(event[1])
                 elif kind == "incoming_auto":
                     self._add_activity("Accepted", f"Automatically accepting {event[1]['name']} from {event[1]['sender']}")
