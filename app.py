@@ -229,6 +229,23 @@ def parse_ipconfig_interfaces(ipconfig_output: str) -> list[dict]:
     return [item for item in interfaces if item["address"]]
 
 
+def parse_default_gateway(ipconfig_output: str) -> str | None:
+    """Return the IPv4 default gateway of the first adapter that has one.
+
+    When this PC is a Mobile Hotspot *client*, the hotspot host is almost
+    always the default gateway, and UDP discovery to it is blocked by the
+    hotspot NAT — so a TCP probe of the gateway is the reliable way to
+    learn the host's presence.
+    """
+    gateway = None
+    for line in ipconfig_output.splitlines():
+        match = re.search(r"Default Gateway[^:]*:\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})", line, re.IGNORECASE)
+        if match and match.group(1) != "0.0.0.0":
+            gateway = match.group(1)
+            break
+    return gateway
+
+
 def is_private_address(address: str) -> bool:
     first, second, *_ = (int(part) for part in address.split("."))
     return first == 10 or (first == 172 and 16 <= second <= 31) or (first == 192 and second == 168)
@@ -389,7 +406,7 @@ class NetworkService:
         self.events.put(("status", f"Identifying PC at {host}…"))
         threading.Thread(target=self._identify_manual_peer, args=(host, port), daemon=True).start()
 
-    def _identify_manual_peer(self, host: str, port: int) -> None:
+    def _identify_manual_peer(self, host: str, port: int, quiet: bool = False) -> None:
         try:
             with socket.create_connection((host, port), timeout=10) as sock:
                 sock.settimeout(10)
@@ -405,7 +422,8 @@ class NetworkService:
                                    "capabilities": reply.get("capabilities", [])}
             self.events.put(("peer", self.peers[peer_id], new))
         except Exception as error:
-            self.events.put(("error", f"Could not identify {host}: {error}"))
+            if not quiet:
+                self.events.put(("error", f"Could not identify {host}: {error}"))
 
     def _announcement(self) -> bytes:
         return json.dumps({"magic": MAGIC, "version": PROTOCOL_VERSION, "fingerprint": self.id,
@@ -430,8 +448,15 @@ class NetworkService:
                     continue
 
     def _announce_loop(self) -> None:
+        cycle = 0
         while self.running.is_set():
             self._announce()
+            # UDP discovery can be one-way on a Mobile Hotspot client; probe
+            # the default gateway (the hotspot host) over TCP so it still
+            # appears. Done every few cycles to avoid frequent ipconfig calls.
+            cycle += 1
+            if cycle % 2 == 0:
+                self._probe_gateway()
             self._remove_stale_peers()
             time.sleep(3)
 
@@ -488,6 +513,26 @@ class NetworkService:
         except OSError:
             # Broadcast discovery remains available; this is only a fallback.
             pass
+
+    def _probe_gateway(self) -> None:
+        """Identify the default gateway as a peer over TCP.
+
+        Used when UDP discovery is blocked (e.g. this PC is a Mobile
+        Hotspot client); the hotspot host is normally the gateway and is
+        reachable over TCP even though its broadcasts are not.
+        """
+        try:
+            result = subprocess.run(["ipconfig"], capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace", timeout=4, check=False)
+            gateway = parse_default_gateway(result.stdout)
+        except (OSError, subprocess.SubprocessError):
+            return
+        if not gateway:
+            return
+        # Never treat our own address as a peer.
+        if gateway in {p.get("host") for p in self.peers.values()}:
+            return
+        self._identify_manual_peer(gateway, self.transfer_port, quiet=True)
 
     def _listen_transfers(self) -> None:
         if not self.receiver_enabled.is_set():
