@@ -109,6 +109,14 @@ func (i *Identity) Config() SettingsFile {
 	return i.config
 }
 
+// SetAutoAccept updates and persists the auto-accept setting.
+func (i *Identity) SetAutoAccept(on bool) error {
+	i.mu.Lock()
+	i.config.AutoAccept = on
+	i.mu.Unlock()
+	return i.save()
+}
+
 // SetReceiveDir updates and persists the receive folder.
 func (i *Identity) SetReceiveDir(dir string) error {
 	i.mu.Lock()

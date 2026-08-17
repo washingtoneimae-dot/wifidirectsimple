@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=PeerDrop LAN
+GenericName=Local file transfer
+Comment=Send files directly between PCs on your local network
+Exec=peerdrop-go
+Icon=peerdrop-go
+Terminal=false
+Type=Application
+Categories=Network;FileTransfer;
+Keywords=file;transfer;lan;wifi;share;send;
+StartupNotify=true
