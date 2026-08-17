@@ -113,21 +113,41 @@ def create_folder_archive(folder: Path) -> Path:
 
 
 def safe_extract_archive(archive_path: Path, destination: Path) -> None:
-    """Extract with traversal, item-count, and expanded-size checks."""
+    """Extract with traversal, item-count, and expanded-size checks.
+
+    Member names are normalized to forward slashes first so archives created on
+    Windows (which may store backslash-separated paths) extract with the correct
+    folder structure on Linux and macOS too.
+    """
     with zipfile.ZipFile(archive_path) as archive:
         members = archive.infolist()
         if len(members) > 10000:
             raise ValueError("Folder archive contains too many items")
         expanded = 0
+        normalized = []
         for member in members:
-            member_path = Path(member.filename)
+            # Normalize Windows-style backslash paths to POSIX separators.
+            clean = member.filename.replace("\\", "/")
+            member_path = Path(clean)
             if member_path.is_absolute() or ".." in member_path.parts:
                 raise ValueError("Folder archive contains an unsafe path")
             expanded += member.file_size
             if expanded > MAX_EXTRACTED_SIZE:
                 raise ValueError("Expanded folder is too large")
+            normalized.append((member, member_path))
         destination.mkdir(parents=True, exist_ok=False)
-        archive.extractall(destination)
+        for member, member_path in normalized:
+            target = destination / member_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if member.is_dir() or member.filename.endswith("/"):
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            with archive.open(member) as source, open(target, "wb") as out:
+                while True:
+                    chunk = source.read(1 << 20)
+                    if not chunk:
+                        break
+                    out.write(chunk)
 
 
 def pack_header(data: dict) -> bytes:
