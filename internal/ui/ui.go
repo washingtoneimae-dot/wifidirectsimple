@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -301,16 +300,12 @@ func (a *App) sendSelected(isFolder bool) {
 
 func (a *App) startSend(peer discovery.Peer, path string, isFolder bool) {
 	go func() {
-		a.activeSendName = filepath.Base(path)
-		a.setCancelSend(true)
 		var e error
 		if isFolder {
 			e = a.xfer.SendFolder(peer.Host, peer.Port, path, a.identity.Name(), a.identity.Fingerprint())
 		} else {
 			e = a.xfer.SendFile(peer.Host, peer.Port, path, a.identity.Name(), a.identity.Fingerprint())
 		}
-		a.activeSendName = ""
-		a.setCancelSend(false)
 		if e != nil {
 			a.appendLog("Send failed: " + e.Error())
 		}
@@ -328,6 +323,8 @@ func (a *App) drainEvents() {
 				frac = float64(e.Current) / float64(e.Total)
 			}
 			fyne.Do(func() {
+				a.activeSendName = e.Name
+				a.setCancelSend(true)
 				a.progress.SetValue(frac)
 				a.status.SetText(fmt.Sprintf("Sending %s → %s", e.Name, e.Peer))
 			})
@@ -337,6 +334,8 @@ func (a *App) drainEvents() {
 				frac = float64(e.Current) / float64(e.Total)
 			}
 			fyne.Do(func() {
+				a.activeRecvName = e.Name
+				a.setCancelRecv(true)
 				a.progress.SetValue(frac)
 				a.status.SetText(fmt.Sprintf("Receiving %s", e.Name))
 			})
@@ -345,23 +344,35 @@ func (a *App) drainEvents() {
 				a.appendLog(fmt.Sprintf("Sent %s to %s", e.Name, e.Peer))
 				a.progress.SetValue(1)
 				a.status.SetText("Ready")
+				a.activeSendName = ""
+				a.setCancelSend(false)
 			})
 		case "received":
 			fyne.Do(func() {
 				a.appendLog(fmt.Sprintf("Received %s", e.Name))
 				a.progress.SetValue(1)
 				a.status.SetText("Ready")
+				a.activeRecvName = ""
+				a.setCancelRecv(false)
 			})
 		case "cancelled":
 			fyne.Do(func() {
 				a.appendLog(fmt.Sprintf("Cancelled %s", e.Name))
 				a.progress.SetValue(0)
 				a.status.SetText("Ready")
+				a.activeSendName = ""
+				a.activeRecvName = ""
+				a.setCancelSend(false)
+				a.setCancelRecv(false)
 			})
 		case "error":
 			fyne.Do(func() {
 				a.appendLog(fmt.Sprintf("Error: %s", e.Name))
 				a.status.SetText("Ready")
+				a.activeSendName = ""
+				a.activeRecvName = ""
+				a.setCancelSend(false)
+				a.setCancelRecv(false)
 			})
 		}
 	}
@@ -398,6 +409,16 @@ func (a *App) setCancelSend(on bool) {
 			a.cancelSend.Enable()
 		} else {
 			a.cancelSend.Disable()
+		}
+	})
+}
+
+func (a *App) setCancelRecv(on bool) {
+	fyne.Do(func() {
+		if on {
+			a.cancelRecv.Enable()
+		} else {
+			a.cancelRecv.Disable()
 		}
 	})
 }
