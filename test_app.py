@@ -8,7 +8,8 @@ from pathlib import Path
 
 from app import (AUTO_ACCEPT_MAX_SIZE, CHUNK_SIZES, MAX_FILE_SIZE, NetworkService, TRANSFER_PORT, directed_broadcast,
                  next_automatic_chunk, pack_header, parse_linux_interfaces, preferred_address,
-                 recv_header, safe_filename, should_auto_accept, stable_fingerprint, unique_destination, wifi_first_address)
+                 recv_header, safe_extract_archive, safe_filename, should_auto_accept, stable_fingerprint,
+                 unique_destination, wifi_first_address)
 
 
 class ProtocolTests(unittest.TestCase):
@@ -22,6 +23,24 @@ class ProtocolTests(unittest.TestCase):
 
     def test_filename_cannot_escape_folder(self):
         self.assertEqual(safe_filename("../../private.txt"), "private.txt")
+
+    def test_windows_zip_extracts_with_posix_structure(self):
+        """A Windows-made archive with backslash paths must keep its folder layout on Linux/macOS."""
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as archive:
+            archive.writestr("docs\\report.txt", b"hello")
+            archive.writestr("docs\\sub\\data.csv", b"a,b,c")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            archive_path = root / "archive.zip"
+            archive_path.write_bytes(buf.getvalue())
+            destination = root / "out"
+            safe_extract_archive(archive_path, destination)
+            found = sorted(str(p.relative_to(destination)) for p in destination.rglob("*") if p.is_file())
+            self.assertEqual(found, ["docs/report.txt", "docs/sub/data.csv"])
+            self.assertEqual((destination / "docs" / "report.txt").read_bytes(), b"hello")
 
     def test_destination_gets_suffix(self):
         folder = Path(self._testMethodName)
