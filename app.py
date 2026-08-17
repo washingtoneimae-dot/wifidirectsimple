@@ -1033,13 +1033,25 @@ class PeerDropApp:
             self._add_activity("Cancel", "No active receive to cancel")
 
     def open_hotspot_settings(self) -> None:
-        # There is no single standard hotspot URI across desktops; point the user
-        # to their network settings and let the environment handle opening it.
+        # There is no single standard hotspot URI across desktops. On GNOME
+        # (the common Ubuntu desktop) the control-center wifi panel is the right
+        # place to turn on the mobile hotspot; fall back to a portal/URI opener.
+        launched = False
         try:
-            subprocess.run(["xdg-open", "settings://network"], check=False, timeout=3)
+            if subprocess.run(["gnome-control-center", "wifi"], check=False, timeout=3).returncode == 0:
+                launched = True
         except (OSError, subprocess.SubprocessError):
             pass
-        messagebox.showinfo(APP_NAME, "Open your desktop's Wi-Fi / hotspot settings to share this connection.")
+        if not launched:
+            for target in ("network", "settings://network"):
+                try:
+                    if subprocess.run(["xdg-open", target], check=False, timeout=3).returncode == 0:
+                        launched = True
+                        break
+                except (OSError, subprocess.SubprocessError):
+                    continue
+        if not launched:
+            messagebox.showinfo(APP_NAME, "Open your desktop's Wi-Fi / hotspot settings to share this connection.")
 
     def pick_and_send(self) -> None:
         selected = self.tree.selection()
