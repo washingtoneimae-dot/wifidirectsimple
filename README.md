@@ -29,6 +29,12 @@ This is the **Linux** build. (The Windows build lives on the `chatgpt` branch.)
    ```
 4. Each PC should appear in the other PC's nearby-device list. Select a device, choose **Send file**, then accept the request on the receiving PC.
 
+While a transfer is in progress you can stop it from either side:
+- On the **Send** tab, **Cancel send** aborts an outgoing transfer.
+- On the **Receive** tab, **Cancel current transfer** aborts an incoming one.
+
+Cancelling cleans up any partially received file and notifies the other PC.
+
 ## Mesh-style sending
 
 Use the **Network** tab to set the nickname other PCs see. On the **Send** tab, select one PC and use **Save selected peer name** to give it your own persistent label; both that label and the PC's shared nickname are shown. Labels are linked to a stable opaque device fingerprint, not an IP address, so they remain correct after DHCP, hotspot, or adapter changes. Hold `Ctrl` while selecting devices (or use `Shift` for a range), choose one file, and it is sent directly to every selected PC at the same time. Each receiving PC approves or declines independently.
