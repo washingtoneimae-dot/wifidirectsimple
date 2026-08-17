@@ -17,6 +17,7 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -111,12 +112,22 @@ func New() *App {
 
 // Show launches the engine and displays the window.
 func (a *App) Show() {
+	a.window.Show()
+
 	if err := a.disc.Start(protocol.TransferPort); err != nil {
 		a.status.SetText("Discovery error: " + err.Error())
 	}
 	if err := a.xfer.StartReceiver(protocol.TransferPort); err != nil {
-		a.status.SetText("Receiver error: " + err.Error())
+		// PeerDrop is designed to run once per machine. The transfer port
+		// being taken almost always means another instance is already
+		// running, so tell the user and quit rather than leaving a
+		// silently-dead copy that can neither send nor receive.
+		a.guardDialog("PeerDrop is already running",
+			"Another copy of PeerDrop LAN is already using this computer's transfer port ("+
+				itoa(protocol.TransferPort)+"). Close the other window first, then start PeerDrop again.")
+		return
 	}
+
 	go a.drainEvents()
 	go a.refreshPeersLoop()
 	a.window.ShowAndRun()
@@ -203,12 +214,32 @@ func (a *App) networkTab() *container.TabItem {
 		a.disc.AnnounceOnce(protocol.TransferPort)
 	})
 
+	// FormLayout gives each entry the full width of the field column, so long
+	// paths/nicknames are never clipped. Action buttons live in their own
+	// toolbar row beneath the form (nesting a button next to an Entry in an
+	// HBox squeezes the Entry to its minimum width and clips the text).
+	form := layout.NewFormLayout()
+	nickRow := container.New(form,
+		widget.NewLabel("Nickname"),
+		nameEntry,
+	)
+	folderRow := container.New(form,
+		widget.NewLabel("Receive folder"),
+		folderEntry,
+	)
+	manualRow := container.New(form,
+		widget.NewLabel("Add PC by IP"),
+		manual,
+	)
+
+	toolbar := container.NewHBox(choose, addBtn, hotspot, refreshNet)
+
 	return container.NewTabItem("Network", container.NewVBox(
 		widget.NewLabel("This PC"),
-		container.NewHBox(widget.NewLabel("Nickname"), nameEntry),
-		container.NewHBox(widget.NewLabel("Receive folder"), folderEntry, choose),
-		container.NewHBox(manual, addBtn),
-		container.NewHBox(hotspot, refreshNet),
+		nickRow,
+		folderRow,
+		manualRow,
+		toolbar,
 		a.status,
 	))
 }
@@ -347,6 +378,15 @@ func (a *App) setCancelSend(on bool) {
 	})
 }
 
+// guardDialog shows an informational dialog explaining that another
+// instance is already running, then quits once it is dismissed.
+func (a *App) guardDialog(title, message string) {
+	d := dialog.NewInformation(title, message, a.window)
+	d.SetOnClosed(func() { a.fyneApp.Quit() })
+	d.Show()
+	a.window.ShowAndRun()
+}
+
 // openHotspotSettings opens the desktop Wi-Fi / hotspot panel and returns
 // without a follow-up dialog (the settings window is the instruction).
 func openHotspotSettings() {
@@ -360,4 +400,28 @@ func openHotspotSettings() {
 	}
 	// Last-resort fallback for non-GNOME desktops.
 	_ = exec.Command("xdg-open", "network").Start()
+}
+
+// itoa is a small non-negative integer-to-string helper (avoids importing
+// strconv just for the port number in UI messages).
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var b [12]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		b[i] = '-'
+	}
+	return string(b[i:])
 }
