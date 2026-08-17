@@ -34,7 +34,7 @@ type App struct {
 	peerList   *widget.List
 	peerData   []discovery.Peer
 	selected   int // index into peerData of the currently selected peer (-1 = none)
-	recvLog    *widget.Label
+	recvLog    *widget.Entry
 	progress   *widget.ProgressBar
 	status     *widget.Label
 	autoAccept *widget.Check
@@ -67,7 +67,13 @@ func New() *App {
 		identity: id,
 		disc:     disc,
 		xfer:     xfer,
-		recvLog:  widget.NewLabel("No activity yet"),
+		recvLog: func() *widget.Entry {
+			e := widget.NewMultiLineEntry()
+			e.SetText("No activity yet")
+			e.Wrapping = fyne.TextWrapWord
+			e.Disable() // read-only activity log
+			return e
+		}(),
 		progress: widget.NewProgressBar(),
 		status:   widget.NewLabel("Starting…"),
 	}
@@ -171,10 +177,12 @@ func (a *App) receiveTab() *container.TabItem {
 		pause.SetText("Resume listening")
 	})
 	progressRow := container.NewVBox(widget.NewLabel("Progress"), a.progress)
+	logScroll := container.NewVScroll(a.recvLog)
+	logScroll.SetMinSize(fyne.NewSize(400, 140))
 	return container.NewTabItem("Receive", container.NewVBox(
 		container.NewHBox(a.autoAccept, pause, a.cancelRecv),
 		widget.NewLabel("Activity"),
-		a.recvLog,
+		logScroll,
 		progressRow,
 	))
 }
